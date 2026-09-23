@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 import respx
 
 from ga4gh_agentic_harness.auth import AuthorityContext
@@ -233,3 +234,15 @@ async def test_federated_wes_workflow_resolves_trs_only_at_the_named_host(settin
         )
     assert named.called
     assert not lookalike.called
+
+
+@pytest.mark.parametrize("data", [
+    {"beaconId": "b", "apiVersion": "1.0.0", "exists": True, "datasetAlleleResponses": []},
+    {"exists": None, "apiVersion": "0.2", "matchesOn": "position", "request": {}, "response": {}},
+    {"responseSummary": {"exists": True, "numTotalResults": 1}},
+])
+def test_beacon_existence_answers_of_every_version_become_evidence(data) -> None:
+    from ga4gh_agentic_harness.workflows.variant_evidence_assembly import _beacon_records
+
+    records = _beacon_records(data)
+    assert [r["id"] for r in records] == ["beacon-existence-response"]
