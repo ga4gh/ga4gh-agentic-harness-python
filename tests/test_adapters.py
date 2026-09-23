@@ -70,12 +70,33 @@ async def test_beacon_query(settings) -> None:
         return_value=httpx.Response(200, json={"response": {"exists": True}})
     )
     http = SafeHttpClient(settings)
-    result = await BeaconAdapter(http).query_variant(
-        service, {"query": {"requestParameters": {}}}, OutboundCredential()
-    )
+    entity = {"query": {"requestParameters": {"geneId": "EIF4A1"},
+                        "filters": [{"id": "HP:0100526"}]}}
+    result = await BeaconAdapter(http).query_variant(service, entity, OutboundCredential())
     assert result["response"]["exists"] is True
     assert route.calls[0].request.method == "POST"
+    assert route.calls[0].request.content and b"HP:0100526" in route.calls[0].request.content
     await http.aclose()
+
+
+@respx.mock
+async def test_beacon_v2_entity_with_a_get_form_is_sent_as_get(settings) -> None:
+    service = ServiceDescriptor(id="b", product="Beacon", url="https://beacon.test/api")
+    route = respx.get("https://beacon.test/api/g_variants").mock(
+        return_value=httpx.Response(200, json={"responseSummary": {"exists": True}})
+    )
+    entity = {"meta": {"apiVersion": "2.0"}, "query": {
+        "requestParameters": {"assemblyId": "GRCh38", "referenceName": "11",
+                              "start": [5227001], "end": [5227002, 5227010],
+                              "referenceBases": "T", "alternateBases": "A"},
+        "requestedGranularity": "boolean", "pagination": {"skip": 0, "limit": 10}}}
+    http = SafeHttpClient(settings)
+    await BeaconAdapter(http).query_variant(service, entity, OutboundCredential())
+    await http.aclose()
+    assert dict(route.calls[0].request.url.params) == {
+        "assemblyId": "GRCh38", "referenceName": "11", "start": "5227001",
+        "end": "5227002,5227010", "referenceBases": "T", "alternateBases": "A",
+        "requestedGranularity": "boolean", "skip": "0", "limit": "10"}
 
 
 @respx.mock

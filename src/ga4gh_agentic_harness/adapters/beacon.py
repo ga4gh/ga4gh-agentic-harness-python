@@ -93,6 +93,46 @@ def _v1_params(query: dict[str, Any]) -> dict[str, Any]:
     return params
 
 
+def _get_value(value: Any) -> Any:
+    # Beacon v2 spells list parameters such as a start or end range comma-concatenated in GET.
+    if isinstance(value, list):
+        if not all(isinstance(item, (str, int, float)) for item in value):
+            return None
+        return ",".join(str(item) for item in value)
+    return value if isinstance(value, (str, int, float, bool)) else None
+
+
+def _v2_get_params(query: dict[str, Any]) -> dict[str, Any] | None:
+    """The GET parameters that say the same as this query, or None when only POST can."""
+    if "query" not in query and "meta" not in query:
+        pairs = dict(query)
+    else:
+        body = query.get("query") or {}
+        meta = query.get("meta") or {}
+        if isinstance(meta, dict) and meta.get("requestedSchemas"):
+            return None
+        if not isinstance(body, dict) or set(body) - {
+            "requestParameters", "requestedGranularity", "includeResultsetResponses",
+            "pagination",
+        }:
+            return None
+        pairs = dict(body.get("requestParameters") or {})
+        for name in ("requestedGranularity", "includeResultsetResponses"):
+            if name in body:
+                pairs[name] = body[name]
+        pagination = body.get("pagination") or {}
+        if not isinstance(pagination, dict) or set(pagination) - {"skip", "limit"}:
+            return None
+        pairs.update(pagination)
+    params: dict[str, Any] = {}
+    for key, value in pairs.items():
+        converted = _get_value(value)
+        if converted is None:
+            return None
+        params[key] = str(converted).lower() if isinstance(converted, bool) else converted
+    return params
+
+
 # ---- queryShape: a registry record's declaration of how its Beacon is asked and answers.
 #
 # {
@@ -298,16 +338,18 @@ class BeaconAdapter(BaseAdapter):
                 f"Beacon {service.standard_version} is not supported; "
                 "the Harness speaks Beacon pre-1.0, v1 and v2"
             )
-        # Beacon permits both query-parameter GETs and request-entity POSTs. A flat mapping is
-        # the portable GET form used by several public Beacons; structured request entities use
-        # POST so their nested shape is preserved.
-        structured = "query" in query or "meta" in query
+        # Beacon v2 accepts query-parameter GETs and request-entity POSTs. GET is the portable
+        # form: implementations differ in the POST bodies they accept (AfriGen-D rejects the
+        # array positions the v2 schema specifies), so a request entity whose every part has a
+        # GET spelling is sent as GET, and only one carrying filters or other nested structure
+        # is POSTed as is.
+        params = _v2_get_params(query)
         result = await self._http.request(
-            "POST" if structured else "GET",
+            "GET" if params is not None else "POST",
             str(service.url).rstrip("/") + f"/{segment(entry_type)}",
             credential=credential,
-            json_body=query if structured else None,
-            params=None if structured else query,
+            json_body=query if params is None else None,
+            params=params,
         )
         data = require_json(result)
         if not isinstance(data, dict):
