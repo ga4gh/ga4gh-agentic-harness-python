@@ -28,19 +28,25 @@ def _source_failure(service_id: str, service_type: str, code: str) -> dict[str, 
 def _beacon_records(data: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(data.get("matches"), list):
         return [item for item in data["matches"] if isinstance(item, dict)]
+    if "exists" in data:
+        # Beacon v1 (BeaconAlleleResponse) and pre-1.0 Beacons answer with a top-level exists.
+        return [{"id": "beacon-existence-response", "kind": "observation", "content": data}]
     response = data.get("response")
-    if not isinstance(response, dict):
-        return []
     records: list[dict[str, Any]] = []
-    for result_set in response.get("resultSets") or []:
-        if isinstance(result_set, dict):
-            records.extend(
-                item for item in (result_set.get("results") or []) if isinstance(item, dict)
-            )
+    if isinstance(response, dict):
+        for result_set in response.get("resultSets") or []:
+            if isinstance(result_set, dict):
+                records.extend(
+                    item for item in (result_set.get("results") or []) if isinstance(item, dict)
+                )
     if records:
         return records
-    if "exists" in response:
+    if isinstance(response, dict) and "exists" in response:
         return [{"id": "beacon-existence-response", "kind": "observation", "content": response}]
+    summary = data.get("responseSummary")
+    if isinstance(summary, dict) and "exists" in summary:
+        # A Beacon v2 boolean-granularity answer carries only the summary.
+        return [{"id": "beacon-existence-response", "kind": "observation", "content": summary}]
     return []
 
 

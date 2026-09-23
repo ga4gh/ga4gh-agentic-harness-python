@@ -316,7 +316,7 @@ async def test_ledger_record_cannot_be_updated_by_another_caller(
 @respx.mock
 async def test_beacon_unsupported_version_maps_to_not_supported(settings, registry_items) -> None:
     items = [dict(i) for i in registry_items]
-    items[2] = items[2] | {"standardVersion": {"ga4ghProduct": "Beacon", "version": "0.3.0"}}
+    items[2] = items[2] | {"standardVersion": {"ga4ghProduct": "Beacon", "version": "0.2.0"}}
     respx.get("https://registry.test/api/services").mock(
         return_value=httpx.Response(200, json=items)
     )
@@ -324,3 +324,33 @@ async def test_beacon_unsupported_version_maps_to_not_supported(settings, regist
         result = await harness.beacon_variant_query("beacon-1", {"referenceName": "1"})
     assert result.status == "failure"
     assert result.errors[0].code == "NOT_SUPPORTED"
+
+
+@respx.mock
+async def test_beacon_query_shape_warns_on_position_match_and_plain_http(
+    settings, registry_items
+) -> None:
+    items = [dict(i) for i in registry_items]
+    items[2] = items[2] | {
+        "url": "http://beacon.test/api",
+        "standardVersion": {"ga4ghProduct": "Beacon", "version": "0.0.0"},
+        "queryShape": {"parameters": {"chrom": "{referenceName}", "pos": "{start}"},
+                       "positions": "1-based", "matchesOn": "position",
+                       "answer": {"format": "json", "exists": "response.exists"}},
+    }
+    respx.get("https://registry.test/api/services").mock(
+        return_value=httpx.Response(200, json=items)
+    )
+    respx.get("http://beacon.test/api").mock(
+        return_value=httpx.Response(200, json={"response": {"exists": "true"}})
+    )
+    settings.allow_http = True
+    async with _harness(settings) as harness:
+        result = await harness.beacon_variant_query(
+            "beacon-1", {"referenceName": "12", "start": 25398283}
+        )
+    assert result.status == "success"
+    assert result.data["exists"] is True
+    assert result.data["request"]["parameters"] == {"chrom": "12", "pos": "25398284"}
+    assert [w.code for w in result.warnings] == [
+        "NOT_CLINICAL_INTERPRETATION", "POSITION_MATCH_ONLY", "PLAIN_HTTP"]
