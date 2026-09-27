@@ -65,19 +65,29 @@ class ServiceRegistry:
             age = time.monotonic() - self._cache[0]
             if age < self._settings.registry_cache_ttl_seconds:
                 return list(self._cache[1])
-        result = await self._http.request(
-            "GET", self._settings.registry_base_url.rstrip("/") + "/services"
-        )
-        if not result.ok or not isinstance(result.json, list):
-            raise RegistryError(result.error or f"registry returned HTTP {result.status}")
         services: list[ServiceDescriptor] = []
-        for item in result.json:
-            if not isinstance(item, dict):
+        failures: list[str] = []
+        for source in self._settings.registries:
+            result = await self._http.request("GET", source.url.rstrip("/") + "/services")
+            if not result.ok or not isinstance(result.json, list):
+                failures.append(
+                    f"{source.url}: {result.error or f'registry returned HTTP {result.status}'}"
+                )
                 continue
-            try:
-                services.append(normalize_service(item))
-            except ValueError:
-                continue
+            for item in result.json:
+                if not isinstance(item, dict):
+                    continue
+                # Implementation Registry records keep their default source label; other
+                # registries are named by URL so a caller can tell where a service came from.
+                if source.api == "service-registry":
+                    item = {"source": source.url, **item}
+                try:
+                    services.append(normalize_service(item))
+                except ValueError:
+                    continue
+        # One unreachable registry does not hide the others; all of them failing is an error.
+        if len(failures) == len(self._settings.registries):
+            raise RegistryError("; ".join(failures))
         merged = {service.id: service for service in services}
         merged.update(self._static)
         combined = list(merged.values())

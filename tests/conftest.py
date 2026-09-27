@@ -31,7 +31,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(
-        registry_base_url="https://registry.test/api",
+        registries=[{"url": "https://registry.test/api", "api": "implementation-registry"}],
         allow_private_hosts=True,
         max_retries=1,
         retry_backoff_seconds=0,

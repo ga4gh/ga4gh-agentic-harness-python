@@ -65,6 +65,12 @@ credentials as runtime environment variables and use a pinned `CredentialProvide
 - GET, HEAD, and OPTIONS receive bounded retries; mutations do not.
 - Responses are size-limited and transport errors become structured envelopes.
 
+Plain HTTP to this machine (`localhost`, `127.0.0.0/8`, `::1`) follows the private-host
+setting: with private hosts allowed, a local service such as a WES on `http://127.0.0.1:18090`
+needs no `allow_http`. Every other host still requires HTTPS unless `allow_http` is set, names
+are never resolved to decide what counts as loopback, and credentials are never sent over plain
+HTTP.
+
 Private endpoints can be tested by explicitly setting
 `GA4GH_HARNESS_ALLOW_PRIVATE_HOSTS=true`. Use this only in a controlled local network and
 prefer `GA4GH_HARNESS_ALLOWED_HOSTS` to restrict the destinations.
@@ -73,8 +79,8 @@ For a local GA4GH Service Registry, the equivalent explicit CLI invocation is:
 
 ```bash
 uv run ga4gh-harness ga4gh.service.search \
-  --registry-url http://127.0.0.1:18080/ga4gh/registry \
-  --allow-http --allow-private-hosts \
+  --registry service-registry=http://127.0.0.1:18080/ga4gh/registry \
+  --allow-private-hosts \
   --input '{"product":"drs"}' --pretty
 ```
 

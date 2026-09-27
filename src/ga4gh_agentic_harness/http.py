@@ -67,6 +67,17 @@ def _embedded_ipv4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
     return None
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True for "localhost" and literal loopback addresses; other names are not resolved."""
+    host = host.lower().strip("[]")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _is_public_ip(value: str) -> bool:
     ip = ipaddress.ip_address(value)
     if isinstance(ip, ipaddress.IPv6Address):
@@ -178,7 +189,16 @@ class SafeHttpClient:
 
     async def _validate_url(self, url: str) -> None:
         parts = urlsplit(url)
-        if parts.scheme not in ({"https", "http"} if self._settings.allow_http else {"https"}):
+        # Plain HTTP to this machine never crosses a network, so it follows the private-host
+        # setting instead of needing allow_http, which admits plain HTTP to any host.
+        loopback_http = (
+            parts.scheme == "http"
+            and self._settings.allow_private_hosts
+            and _is_loopback_host(parts.hostname or "")
+        )
+        if not loopback_http and parts.scheme not in (
+            {"https", "http"} if self._settings.allow_http else {"https"}
+        ):
             raise UnsafeUrlError("only HTTPS URLs are permitted")
         if parts.username or parts.password or not parts.hostname:
             raise UnsafeUrlError("URL credentials and missing hosts are prohibited")

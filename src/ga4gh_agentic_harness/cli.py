@@ -12,7 +12,7 @@ from typing import Any
 from .auth import AuthorityContext
 from .harness import Harness
 from .models import Operation, ResultStatus
-from .settings import Settings
+from .settings import RegistrySource, Settings
 
 
 def _load_payload(value: str) -> dict[str, Any]:
@@ -22,6 +22,13 @@ def _load_payload(value: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("input must be a JSON object")
     return parsed
+
+
+def _registry(value: str) -> RegistrySource:
+    api, sep, url = value.partition("=")
+    if not sep or not url:
+        raise ValueError(f"--registry must be API=URL, got {value!r}")
+    return RegistrySource.model_validate({"url": url, "api": api})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,7 +42,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--principal", help="Authenticated human principal ID")
     parser.add_argument("--purpose", help="Declared purpose of use")
     parser.add_argument("--scope", action="append", default=[], help="Validated inbound scope")
-    parser.add_argument("--registry-url", help="Override the GA4GH registry API base URL")
+    parser.add_argument(
+        "--registry",
+        action="append",
+        default=[],
+        metavar="API=URL",
+        help=(
+            "Registry to discover services from, repeatable; replaces the default GA4GH "
+            "Implementation Registry. API is implementation-registry or service-registry."
+        ),
+    )
     parser.add_argument(
         "--allow-http",
         action="store_true",
@@ -63,8 +79,8 @@ async def _run(args: argparse.Namespace) -> int:
         "allow_http": args.allow_http,
         "allow_private_hosts": args.allow_private_hosts,
     }
-    if args.registry_url:
-        overrides["registry_base_url"] = args.registry_url
+    if args.registry:
+        overrides["registries"] = [_registry(value) for value in args.registry]
     if args.ledger_path:
         overrides["ledger_path"] = args.ledger_path
     async with Harness(settings=Settings(**overrides)) as harness:

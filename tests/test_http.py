@@ -197,3 +197,48 @@ async def test_dns_rebinding_to_loopback_is_blocked_at_connect(
     assert result.status is None
     assert result.error_kind == "security"
     assert requests == []
+
+
+@pytest.mark.parametrize(
+    "url", ["http://127.0.0.1:18090/x", "http://localhost:18090/x", "http://[::1]:18090/x"]
+)
+async def test_plain_http_to_loopback_follows_the_private_host_setting(url: str) -> None:
+    allowed = SafeHttpClient(Settings(allow_private_hosts=True, max_retries=0))
+    refused = SafeHttpClient(Settings(max_retries=0))
+    try:
+        await allowed._validate_url(url)
+        with pytest.raises(UnsafeUrlError, match="only HTTPS"):
+            await refused._validate_url(url)
+    finally:
+        await allowed.aclose()
+        await refused.aclose()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.org/x",
+        "http://10.0.0.5/x",
+        # A name that resolves to loopback is not treated as loopback: names are not resolved.
+        "http://localtest.me/x",
+    ],
+)
+async def test_plain_http_elsewhere_still_needs_allow_http(url: str) -> None:
+    client = SafeHttpClient(Settings(allow_private_hosts=True, max_retries=0))
+    try:
+        with pytest.raises(UnsafeUrlError, match="only HTTPS"):
+            await client._validate_url(url)
+    finally:
+        await client.aclose()
+
+
+async def test_credentials_are_not_sent_over_plain_http_to_loopback() -> None:
+    client = SafeHttpClient(Settings(allow_private_hosts=True, max_retries=0))
+    credential = OutboundCredential(
+        headers={"Authorization": "Bearer secret"}, resource="http://127.0.0.1:18090/api"
+    )
+    try:
+        with pytest.raises(UnsafeUrlError):
+            await client.request("GET", "http://127.0.0.1:18090/api/value", credential=credential)
+    finally:
+        await client.aclose()
