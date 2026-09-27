@@ -5,6 +5,7 @@ import pytest
 import respx
 
 from ga4gh_agentic_harness.adapters import BeaconAdapter, DrsAdapter, TrsAdapter, WesAdapter
+from ga4gh_agentic_harness.adapters.base import AdapterError
 from ga4gh_agentic_harness.adapters.beacon import BeaconVersionError
 from ga4gh_agentic_harness.auth import OutboundCredential
 from ga4gh_agentic_harness.http import SafeHttpClient
@@ -69,12 +70,33 @@ async def test_beacon_query(settings) -> None:
         return_value=httpx.Response(200, json={"response": {"exists": True}})
     )
     http = SafeHttpClient(settings)
-    result = await BeaconAdapter(http).query_variant(
-        service, {"query": {"requestParameters": {}}}, OutboundCredential()
-    )
+    entity = {"query": {"requestParameters": {"geneId": "EIF4A1"},
+                        "filters": [{"id": "HP:0100526"}]}}
+    result = await BeaconAdapter(http).query_variant(service, entity, OutboundCredential())
     assert result["response"]["exists"] is True
     assert route.calls[0].request.method == "POST"
+    assert route.calls[0].request.content and b"HP:0100526" in route.calls[0].request.content
     await http.aclose()
+
+
+@respx.mock
+async def test_beacon_v2_entity_with_a_get_form_is_sent_as_get(settings) -> None:
+    service = ServiceDescriptor(id="b", product="Beacon", url="https://beacon.test/api")
+    route = respx.get("https://beacon.test/api/g_variants").mock(
+        return_value=httpx.Response(200, json={"responseSummary": {"exists": True}})
+    )
+    entity = {"meta": {"apiVersion": "2.0"}, "query": {
+        "requestParameters": {"assemblyId": "GRCh38", "referenceName": "11",
+                              "start": [5227001], "end": [5227002, 5227010],
+                              "referenceBases": "T", "alternateBases": "A"},
+        "requestedGranularity": "boolean", "pagination": {"skip": 0, "limit": 10}}}
+    http = SafeHttpClient(settings)
+    await BeaconAdapter(http).query_variant(service, entity, OutboundCredential())
+    await http.aclose()
+    assert dict(route.calls[0].request.url.params) == {
+        "assemblyId": "GRCh38", "referenceName": "11", "start": "5227001",
+        "end": "5227002,5227010", "referenceBases": "T", "alternateBases": "A",
+        "requestedGranularity": "boolean", "skip": "0", "limit": "10"}
 
 
 @respx.mock
@@ -181,7 +203,7 @@ V1_QUERY = {"referenceName": "1", "start": 100000, "referenceBases": "A",
             "alternateBases": "T", "assemblyId": "GRCh37"}
 
 
-@pytest.mark.parametrize("version", ["v1.0", "1.0.1", "1.1.0", "v1"])
+@pytest.mark.parametrize("version", ["v1.0", "1.0.1", "1.1.0", "v1", "0.3.0", "0.4"])
 @respx.mock
 async def test_beacon_v1_declared_version_uses_query_endpoint(settings, version) -> None:
     route = respx.get("https://beacon1.test/api/query").mock(return_value=httpx.Response(
@@ -243,7 +265,7 @@ async def test_beacon_v1_has_no_other_entry_types(settings) -> None:
     await http.aclose()
 
 
-@pytest.mark.parametrize("version", ["0.3.0", "v3.0", "latest"])
+@pytest.mark.parametrize("version", ["0.2", "0.1.0", "v3.0", "latest"])
 async def test_beacon_unsupported_declared_version_is_refused(settings, version) -> None:
     http = SafeHttpClient(settings)
     with pytest.raises(BeaconVersionError, match="Beacon"):
@@ -262,3 +284,174 @@ async def test_beacon_v2_or_undeclared_keeps_g_variants(settings, version) -> No
                                             OutboundCredential())
     await http.aclose()
     assert route.called
+
+
+@respx.mock
+async def test_beacon_v1_single_position_array_is_start(settings) -> None:
+    route = respx.get("https://beacon1.test/api/query").mock(
+        return_value=httpx.Response(200, json={"exists": True}))
+    entity = {"meta": {}, "query": {"requestParameters": V1_QUERY | {"start": [100000]}}}
+    http = SafeHttpClient(settings)
+    await BeaconAdapter(http).query_variant(_beacon("1.0"), entity, OutboundCredential())
+    await http.aclose()
+    assert dict(route.calls[0].request.url.params)["start"] == "100000"
+
+
+# ---- queryShape: pre-1.0 and pre-standard Beacons, queried as their registry record declares
+
+def _shaped(
+    shape: dict, version: str = "0.2", url: str = "https://old.test/beacon"
+) -> ServiceDescriptor:
+    return ServiceDescriptor(id="old", product="Beacon", standard_version=version, url=url,
+                             raw={"queryShape": shape})
+
+
+UCSC_SHAPE = {
+    "path": "/query",
+    "parameters": {"dataset": "lovd", "chromosome": "{referenceName}", "position": "{start}",
+                   "alternateBases": "{alternateBases}"},
+    "positions": "1-based", "chromosome": "bare", "assemblies": {"GRCh37": "GRCh37"},
+    "answer": {"format": "json", "exists": "response.exists"},
+}
+
+
+@respx.mock
+async def test_query_shape_converts_coordinates_and_reads_string_answer(settings) -> None:
+    route = respx.get("https://old.test/beacon/query").mock(return_value=httpx.Response(
+        200, json={"beacon": {"api": "0.2"}, "response": {"exists": "true"}}))
+    http = SafeHttpClient(settings)
+    result = await BeaconAdapter(http).query_variant(
+        _shaped(UCSC_SHAPE),
+        {"referenceName": "chr11", "start": 5248231, "alternateBases": "A",
+         "assemblyId": "grch37"},
+        OutboundCredential())
+    await http.aclose()
+    assert dict(route.calls[0].request.url.params) == {
+        "dataset": "lovd", "chromosome": "11", "position": "5248232", "alternateBases": "A"}
+    assert result["exists"] is True
+    assert result["apiVersion"] == "0.2"
+    assert result["matchesOn"] == "allele"
+    assert result["response"]["response"]["exists"] == "true"
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("false", False), ("null", None), (None, None), (False, False), ([], False), ([{}], True)])
+@respx.mock
+async def test_query_shape_json_answers(settings, value, expected) -> None:
+    shape = UCSC_SHAPE | {"answer": {"format": "json", "exists": "response.exists"}}
+    respx.get("https://old.test/beacon/query").mock(
+        return_value=httpx.Response(200, json={"response": {"exists": value}}))
+    http = SafeHttpClient(settings)
+    result = await BeaconAdapter(http).query_variant(
+        _shaped(shape), dict(V1_QUERY), OutboundCredential())
+    await http.aclose()
+    assert result["exists"] is expected
+
+
+@respx.mock
+async def test_query_shape_whole_body_list_and_chr_prefix(settings) -> None:
+    shape = {"parameters": {"chrom": "{referenceName}", "spos": "{start}",
+                            "ref": "{referenceBases}", "alt": "{alternateBases}"},
+             "positions": "1-based", "chromosome": "chr",
+             "answer": {"format": "json", "exists": ""}}
+    route = respx.get("https://old.test/beacon").mock(
+        return_value=httpx.Response(200, json=[{"gene": "GABRB3"}]))
+    http = SafeHttpClient(settings)
+    result = await BeaconAdapter(http).query_variant(
+        _shaped(shape, version="0.0.0"),
+        {"referenceName": "15", "start": 27018840, "referenceBases": "G", "alternateBases": "A"},
+        OutboundCredential())
+    await http.aclose()
+    assert dict(route.calls[0].request.url.params)["chrom"] == "chr15"
+    assert dict(route.calls[0].request.url.params)["spos"] == "27018841"
+    assert result["exists"] is True
+
+
+@respx.mock
+async def test_query_shape_text_answer_and_form_post(settings) -> None:
+    shape = {"method": "POST", "parameters": {"genome": "{assemblyId}", "chr": "{referenceName}",
+                                              "coord": "{start}", "allele": "{alternateBases}"},
+             "chromosome": "chr", "assemblies": {"GRCh37": "hg19", "hg19": "hg19"},
+             "answer": {"format": "text", "found": "Beacon found allele",
+                        "notFound": "Beacon cannot find allele"}}
+    route = respx.post("http://old.test/beacon.php").mock(return_value=httpx.Response(
+        200, text="<html>Beacon found allele G at coordinate chr1:69510</html>"))
+    settings.allow_http = True
+    http = SafeHttpClient(settings)
+    result = await BeaconAdapter(http).query_variant(
+        _shaped(shape, version="0.0.0", url="http://old.test/beacon.php"),
+        {"referenceName": "1", "start": 69510, "alternateBases": "G", "assemblyId": "GRCh37"},
+        OutboundCredential())
+    await http.aclose()
+    body = route.calls[0].request.content.decode()
+    assert "genome=hg19" in body and "chr=chr1" in body and "coord=69510" in body
+    assert result["exists"] is True
+    assert result["response"].startswith("<html>Beacon found")
+
+
+@respx.mock
+async def test_query_shape_unrecognised_text_is_invalid_response(settings) -> None:
+    shape = {"parameters": {"pos": "{start}"}, "answer": {
+        "format": "text", "found": "Yes", "notFound": "No"}}
+    respx.get("https://old.test/beacon").mock(return_value=httpx.Response(200, text=""))
+    http = SafeHttpClient(settings)
+    with pytest.raises(AdapterError, match="neither") as caught:
+        await BeaconAdapter(http).query_variant(
+            _shaped(shape), {"start": 5}, OutboundCredential())
+    await http.aclose()
+    assert caught.value.result.error_kind == "invalid_response"
+
+
+@pytest.mark.parametrize(("query", "message"), [
+    ({"referenceName": "1", "start": 5, "alternateBases": "A"}, "assemblyId is required"),
+    (V1_QUERY | {"assemblyId": "GRCh38"}, "does not hold assembly"),
+    ({"start": 5, "alternateBases": "A", "assemblyId": "GRCh37"}, "requires referenceName"),
+    (V1_QUERY | {"start": [5, 9]}, "exact positions"),
+])
+async def test_query_shape_rejects_queries_it_cannot_answer(settings, query, message) -> None:
+    http = SafeHttpClient(settings)
+    with pytest.raises(ValueError, match=message):
+        await BeaconAdapter(http).query_variant(_shaped(UCSC_SHAPE), query, OutboundCredential())
+    await http.aclose()
+
+
+@pytest.mark.parametrize("path", ["//evil.test/x", "/../admin", "/q?x=1", "https://evil.test",
+                                  "/a/%2e%2e/b", "query"])
+async def test_query_shape_path_cannot_leave_the_service_url(settings, path) -> None:
+    http = SafeHttpClient(settings)
+    with pytest.raises(BeaconVersionError, match="relative path"):
+        await BeaconAdapter(http).query_variant(
+            _shaped(UCSC_SHAPE | {"path": path}), dict(V1_QUERY), OutboundCredential())
+    await http.aclose()
+
+
+@pytest.mark.parametrize("shape", [
+    UCSC_SHAPE | {"parameters": {"x": "{secret}"}},
+    UCSC_SHAPE | {"method": "DELETE"},
+    UCSC_SHAPE | {"positions": "2-based"},
+    UCSC_SHAPE | {"answer": {"format": "xml"}},
+    UCSC_SHAPE | {"matchesOn": "gene"},
+])
+async def test_query_shape_unrecognised_declarations_are_refused(settings, shape) -> None:
+    http = SafeHttpClient(settings)
+    with pytest.raises(BeaconVersionError):
+        await BeaconAdapter(http).query_variant(_shaped(shape), dict(V1_QUERY),
+                                                OutboundCredential())
+    await http.aclose()
+
+
+@respx.mock
+async def test_query_shape_takes_precedence_over_declared_v1(settings) -> None:
+    # VICC declares 0.4 and speaks v1 parameters, but counts positions from 1.
+    shape = {"path": "/query", "parameters": {
+        "assemblyId": "{assemblyId}", "referenceName": "{referenceName}", "start": "{start}",
+        "referenceBases": "{referenceBases}", "alternateBases": "{alternateBases}"},
+        "positions": "1-based", "answer": {"format": "json", "exists": "exists"}}
+    route = respx.get("https://old.test/beacon/query").mock(
+        return_value=httpx.Response(200, json={"apiVersion": "0.4.0", "exists": True}))
+    http = SafeHttpClient(settings)
+    result = await BeaconAdapter(http).query_variant(
+        _shaped(shape, version="0.4.0"), dict(V1_QUERY), OutboundCredential())
+    await http.aclose()
+    assert dict(route.calls[0].request.url.params)["start"] == "100001"
+    assert result["exists"] is True

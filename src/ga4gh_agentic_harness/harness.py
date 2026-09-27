@@ -54,7 +54,7 @@ _CAPABILITIES: dict[str, list[tuple[Operation, str, bool]]] = {
     "BEACON": [
         (
             Operation.BEACON_VARIANT_QUERY,
-            "Query a Beacon v1 or v2 service for a genomic variant.",
+            "Query a Beacon service (pre-1.0, v1 or v2) for a genomic variant.",
             False,
         ),
     ],
@@ -628,7 +628,7 @@ class Harness:
                 "Results are evidence retrieval and must not be treated as a clinical conclusion."
             ),
         )
-        return await self._service_operation(
+        envelope = await self._service_operation(
             Operation.BEACON_VARIANT_QUERY,
             service_id,
             lambda service, credential: self.beacon.query_variant(
@@ -637,6 +637,29 @@ class Harness:
             authority=authority,
             warnings=[warning],
         )
+        data = envelope.data if isinstance(envelope.data, dict) else {}
+        if data.get("matchesOn") == "position":
+            envelope.warnings.append(
+                Warning(
+                    code="POSITION_MATCH_ONLY",
+                    message=(
+                        "This Beacon matches on position, not allele: exists means it holds a "
+                        "variant at the position, not necessarily the queried allele."
+                    ),
+                )
+            )
+        request = data.get("request")
+        if isinstance(request, dict) and str(request.get("url", "")).startswith("http://"):
+            envelope.warnings.append(
+                Warning(
+                    code="PLAIN_HTTP",
+                    message=(
+                        "This Beacon is served over plain HTTP only, so its answer was not "
+                        "protected in transit. No credential was sent."
+                    ),
+                )
+            )
+        return envelope
 
     async def wes_service_describe(
         self, service_id: str, *, authority: AuthorityContext | None = None

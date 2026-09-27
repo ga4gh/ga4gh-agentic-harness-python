@@ -3,7 +3,7 @@
 ## Architecture
 
 `Harness` owns canonical operation semantics. `ServiceRegistry` normalizes registry records;
-DRS, TRS, Beacon (v1 and v2), and WES adapters map operations to native APIs; `SafeHttpClient` enforces
+DRS, TRS, Beacon (pre-1.0, v1 and v2), and WES adapters map operations to native APIs; `SafeHttpClient` enforces
 transport policy; and `WorkflowRunLedger` stores WES submission state in SQLite.
 
 Endpoints do not have to appear in the public implementation registry. Pass trusted,
@@ -88,16 +88,55 @@ The HTTP and private-host flags are opt-in and should not be used for remote ser
 
 ## Beacon versions
 
-`ga4gh.beacon.variant.query` picks the Beacon protocol from the version the service declares
-in its registry record (`standardVersion.version`, for example `v1.0` or `v2.0.0`). It does not
-probe the service to find out.
+`ga4gh.beacon.variant.query` reaches every Beacon version: pre-1.0, v1 and v2. It picks the
+protocol from what the service's registry record declares, never by probing the service.
+Callers always send v1/v2 field names (`referenceName`, `start`, `referenceBases`,
+`alternateBases`, `assemblyId`) with 0-based positions, as a flat mapping or a v2 request entity.
 
-- **v1** (`1.x`): `GET {url}/query` with BeaconAlleleRequest parameters. `referenceName`,
-  `referenceBases` and `assemblyId` are required. A v2 request entity is accepted and mapped:
-  `query.requestParameters` supplies the parameters, a two-element `start`/`end` range becomes
-  `startMin`/`startMax` and `endMin`/`endMax`, and `includeResultsetResponses` becomes
-  `includeDatasetResponses`. Only `entry_type` `g_variants` exists in v1. The native
+- **queryShape**, when the record has one, wins over the declared version. Pre-1.0 Beacons
+  differ in path, parameter names, coordinate base, chromosome form and answer format, and two
+  that both declare 0.2 count positions from different bases, so the version cannot say which.
+  The record says instead:
+
+  ```json
+  "queryShape": {
+    "method": "GET",
+    "path": "/query",
+    "parameters": {"dataset": "lovd", "chromosome": "{referenceName}",
+                   "position": "{start}", "alternateBases": "{alternateBases}"},
+    "positions": "1-based",
+    "chromosome": "bare",
+    "assemblies": {"GRCh37": "GRCh37", "hg19": "GRCh37"},
+    "answer": {"format": "json", "exists": "response.exists"},
+    "matchesOn": "allele"
+  }
+  ```
+
+  `method` is GET or POST (a form-encoded body). `path` extends the service URL and cannot
+  leave it. Parameter values are literals or one of the five placeholders above. `positions`
+  (`0-based` or `1-based`) and `chromosome` (`bare` for 11, `chr` for chr11) convert the
+  caller's values. `assemblies` lists the `assemblyId` values the Beacon holds and the token
+  sent for each. `answer` reads `exists` from a JSON field path (`""` is the whole body; a list
+  is true when non-empty; the strings `true`, `false` and `null` are read as such) or, with
+  `"format": "text"`, from literal `found` and `notFound` substrings. `matchesOn: "position"`
+  adds a `POSITION_MATCH_ONLY` warning. The result is `{exists, apiVersion, matchesOn, request,
+  response}`, with the exact request sent and the Beacon's own answer as evidence. The shape is
+  checked before any request is sent.
+- **v1** (`1.x`), and **0.3 / 0.4** without a shape (v1 kept their BeaconAlleleRequest):
+  `GET {url}/query` with BeaconAlleleRequest parameters. `referenceName`, `referenceBases` and
+  `assemblyId` are required. A v2 request entity is accepted and mapped: `query.requestParameters`
+  supplies the parameters, a one-element `start`/`end` array becomes `start`/`end` and a
+  two-element one `startMin`/`startMax` and `endMin`/`endMax`, and `includeResultsetResponses`
+  becomes `includeDatasetResponses`. Only `entry_type` `g_variants` exists in v1. The native
   BeaconAlleleResponse (`exists`, `datasetAlleleResponses`) is returned as is.
-- **v2** (`2.x`), or no declared version: `{url}/{entry_type}`, GET for a flat query and POST
-  for a request entity, as before.
-- Any other declared version (for example pre-1.0 `0.x`) fails with `NOT_SUPPORTED`.
+- **v2** (`2.x`), or no declared version: `{url}/{entry_type}`. A flat query, and a request
+  entity whose parts all have a GET spelling (request parameters, `requestedGranularity`,
+  `includeResultsetResponses`, `pagination`), go as GET with list values comma-concatenated as
+  the Beacon v2 documentation specifies. An entity with filters or other nested structure is
+  POSTed as is. GET is the portable form: AfriGen-D rejects the array positions the v2 schema
+  specifies in a POST body, and answers the same query over GET.
+- **0.1 / 0.2** without a shape, or any other major version, fail with `NOT_SUPPORTED`.
+
+Some pre-1.0 Beacons are served over plain HTTP only. Reaching them needs `allow_http`
+(`GA4GH_HARNESS_ALLOW_HTTP=true`); credentials are never sent over HTTP, and such results carry a
+`PLAIN_HTTP` warning.
